@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import {
     loadCampaign,
+    markSeen,
     rollD20,
     takeTurn,
     updateMyCharacter,
@@ -9,24 +10,51 @@
   } from '../lib/api';
   import { inviteLink } from '../lib/router.svelte';
   import SettingPicker from './SettingPicker.svelte';
-  import type { Campaign, LogEntry, Player } from '../lib/types';
+  import TurnStatus from './TurnStatus.svelte';
+  import { alertsEnabled, alertsSupported, enableAlerts, notify } from '../lib/alerts';
+  import { ago } from '../lib/time';
+  import type { Campaign, LogEntry, Nudge, Player } from '../lib/types';
 
   let { id, userId }: { id: string; userId: string } = $props();
 
   let campaign = $state<Campaign | null>(null);
   let players = $state<Player[]>([]);
   let log = $state<LogEntry[]>([]);
+  let nudges = $state<Nudge[]>([]);
+  let presence = $state<Set<string>>(new Set());
+  let now = $state(Date.now());
+  let alertsOn = $state(alertsEnabled());
+  let toast = $state('');
   let loading = $state(true);
   let error = $state('');
   let copied = $state(false);
 
   let me = $derived(players.find((p) => p.user_id === userId));
+  // You're always online to yourself, even before presence syncs.
+  let online = $derived(me ? new Set([...presence, me.id]) : presence);
   let isHost = $derived(campaign?.created_by === userId);
   let current = $derived(players.find((p) => p.id === campaign?.current_player_id));
   let host = $derived(players.find((p) => p.user_id === campaign?.created_by));
 
   let myTurn = $derived(campaign?.status === 'active' && !!me && me.id === campaign.current_player_id);
   let gmBusy = $derived(!!campaign?.gm_busy_since);
+  let turnNudges = $derived(
+    nudges.filter((n) => n.turn_number === campaign?.turn_number && n.to_player === campaign?.current_player_id),
+  );
+
+  // Flag the tab when it's your turn, so it stands out among open tabs.
+  $effect(() => {
+    const base = campaign ? `${campaign.name} · Friendslop RPG` : 'Friendslop RPG';
+    document.title = myTurn ? `(Your turn!) ${base}` : base;
+  });
+
+  let lastTurnAlerted = -1;
+  $effect(() => {
+    if (myTurn && campaign && campaign.turn_number !== lastTurnAlerted) {
+      lastTurnAlerted = campaign.turn_number;
+      notify("It's your turn!", `${campaign.name}: the party is waiting for you.`);
+    }
+  });
 
   let action = $state('');
   let rolled = $state<number | null>(null);
@@ -39,13 +67,26 @@
 
   onMount(() => {
     let stop = () => {};
+    let alive = true;
+
+    const seen = () => {
+      if (document.visibilityState === 'visible') markSeen(id).catch(() => {});
+    };
+    const tick = setInterval(() => {
+      now = Date.now();
+      seen();
+    }, 60_000);
+    document.addEventListener('visibilitychange', seen);
+
     (async () => {
+      let mine: Player | undefined;
       try {
         const data = await loadCampaign(id);
         campaign = data.campaign;
         players = data.players;
         log = data.log;
-        const mine = players.find((p) => p.user_id === userId);
+        nudges = data.nudges;
+        mine = players.find((p) => p.user_id === userId);
         editName = mine?.name ?? '';
         editCharacter = mine?.character ?? '';
       } catch (e) {
@@ -53,8 +94,10 @@
       } finally {
         loading = false;
       }
+      if (!alive) return;
+      seen();
 
-      stop = watchCampaign(id, {
+      stop = watchCampaign(id, mine?.id, {
         onCampaign: (c) => (campaign = c),
         onPlayer: (p) => {
           const i = players.findIndex((x) => x.id === p.id);
@@ -64,10 +107,35 @@
         onLog: (e) => {
           if (!log.some((x) => x.id === e.id)) log = [...log, e];
         },
+        onNudge: (n) => {
+          if (nudges.some((x) => x.id === n.id)) return;
+          nudges = [...nudges, n];
+          if (n.to_player === me?.id) {
+            const from = nameOf(n.from_player);
+            showToast(`👉 ${from} nudged you. It's your turn!`);
+            notify(`${from} nudged you 👉`, "It's your turn. The party is waiting!");
+          }
+        },
+        onOnline: (ids) => (presence = ids),
       });
     })();
-    return () => stop();
+
+    return () => {
+      alive = false;
+      clearInterval(tick);
+      document.removeEventListener('visibilitychange', seen);
+      stop();
+    };
   });
+
+  function showToast(text: string) {
+    toast = text;
+    setTimeout(() => (toast = ''), 5000);
+  }
+
+  async function turnOnAlerts() {
+    alertsOn = await enableAlerts();
+  }
 
   async function copyInvite() {
     if (!campaign) return;
@@ -149,6 +217,12 @@
   {#if myTurn}
     <section class="card turn">
       <h2>Your turn!</h2>
+      {#if turnNudges.length}
+        <p class="muted">
+          👉 {[...new Set(turnNudges.map((n) => nameOf(n.from_player)))].join(', ')}
+          {turnNudges.length === 1 ? 'nudged you' : `nudged you ${turnNudges.length} times`}
+        </p>
+      {/if}
       <form onsubmit={act}>
         <label for="action">What do you do?</label>
         <textarea
@@ -172,17 +246,44 @@
     </section>
   {/if}
 
+  {#if campaign.status === 'active' && current && !myTurn}
+    <TurnStatus
+      campaignId={id}
+      {current}
+      online={online.has(current.id)}
+      {gmBusy}
+      nudges={turnNudges}
+      {now}
+    />
+  {/if}
+
+  {#if me && alertsSupported() && !alertsOn && campaign.status !== 'ended'}
+    <p class="alerts muted">
+      <button class="link" onclick={turnOnAlerts}>Turn on notifications</button> to hear when it's your turn.
+    </p>
+  {/if}
+
   <section class="card">
     <h2>Party <span class="muted">({players.length}/10)</span></h2>
     <ul class="party">
       {#each players as p (p.id)}
         <li class:active={p.id === campaign.current_player_id}>
-          <div class="avatar">{p.name.slice(0, 1).toUpperCase()}</div>
+          <div class="avatar">
+            {p.name.slice(0, 1).toUpperCase()}
+            <span
+              class="dot"
+              class:on={online.has(p.id)}
+              title={online.has(p.id) ? 'Online' : `Last seen ${ago(p.last_seen_at, now)}`}
+            ></span>
+          </div>
           <div class="who">
             <strong>{p.name}</strong>
             {#if p.user_id === userId}<span class="muted">(you)</span>{/if}
-            {#if p.id === campaign.current_player_id}<span class="pill small">their turn</span>{/if}
+            {#if p.id === campaign.current_player_id}<span class="pill small">{p.user_id === userId ? 'your turn' : 'their turn'}</span>{/if}
             {#if p.character}<div class="muted small-text">{p.character}</div>{/if}
+            {#if !online.has(p.id) && p.user_id !== userId}
+              <div class="muted small-text">Away · seen {ago(p.last_seen_at, now)}</div>
+            {/if}
           </div>
           <div class="hp">❤️ {p.stats.hp}/{p.stats.max_hp}</div>
         </li>
@@ -211,11 +312,6 @@
 
   <section class="card">
     <h2>Adventure log</h2>
-    {#if gmBusy && !acting}
-      <p class="muted">The Gamemaster is narrating…</p>
-    {:else if current && campaign.status === 'active' && !myTurn}
-      <p class="muted">Waiting on {current.name}…</p>
-    {/if}
     <ol class="log">
       {#each log as e (e.id)}
         <li class={e.kind}>
@@ -227,6 +323,8 @@
     </ol>
   </section>
 {/if}
+
+{#if toast}<div class="toast" role="status">{toast}</div>{/if}
 
 <style>
   .pill {
@@ -262,6 +360,7 @@
     background: var(--soft);
   }
   .avatar {
+    position: relative;
     flex: none;
     width: 36px;
     height: 36px;
@@ -271,6 +370,43 @@
     background: var(--accent);
     color: var(--accent-ink);
     font-weight: 800;
+  }
+  .dot {
+    position: absolute;
+    right: -2px;
+    bottom: -2px;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    border: 2px solid var(--card);
+    background: var(--line);
+  }
+  .dot.on {
+    background: #3ccf8e;
+  }
+  .alerts {
+    margin: -4px 4px 16px;
+    font-size: 0.9rem;
+  }
+  button.link {
+    background: none;
+    color: var(--accent);
+    padding: 0;
+    border-radius: 0;
+    text-decoration: underline;
+  }
+  .toast {
+    position: fixed;
+    left: 50%;
+    bottom: calc(16px + env(safe-area-inset-bottom));
+    transform: translateX(-50%);
+    max-width: calc(100% - 32px);
+    background: var(--ink);
+    color: var(--bg);
+    padding: 10px 16px;
+    border-radius: 999px;
+    font-weight: 700;
+    box-shadow: 0 4px 16px rgb(0 0 0 / 0.2);
   }
   .who {
     flex: 1;

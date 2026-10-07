@@ -20,6 +20,7 @@ export type Player = {
   character: string;
   stats: { hp: number; max_hp: number; [key: string]: unknown };
   joined_at: string;
+  last_seen_at: string | null;
 };
 
 export type LogEntry = {
@@ -34,3 +35,12 @@ export type LogEntry = {
 };
 
 export type SettingIdea = { title: string; pitch: string };
+
+export type Nudge = {
+  id: number;
+  campaign_id: string;
+  from_player: string;
+  to_player: string;
+  turn_number: number;
+  created_at: string;
+};
