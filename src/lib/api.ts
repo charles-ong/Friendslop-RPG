@@ -1,5 +1,5 @@
 import { supabase } from './supabase';
-import type { Campaign, LogEntry, Player, SettingIdea } from './types';
+import type { Campaign, LogEntry, Nudge, Player, SettingIdea } from './types';
 
 function unwrap<T>({ data, error }: { data: T | null; error: { message: string } | null }): T {
   if (error) throw new Error(error.message);
@@ -64,16 +64,26 @@ export async function beginCampaign(campaignId: string, setting: string): Promis
   await gamemaster({ type: 'begin', campaign_id: campaignId, setting });
 }
 
+export async function markSeen(campaignId: string): Promise<void> {
+  unwrap(await supabase.rpc('mark_seen', { cid: campaignId }));
+}
+
+export async function nudge(campaignId: string): Promise<void> {
+  unwrap(await supabase.rpc('nudge', { cid: campaignId }));
+}
+
 export async function loadCampaign(campaignId: string) {
-  const [campaign, players, log] = await Promise.all([
+  const [campaign, players, log, nudges] = await Promise.all([
     supabase.from('campaigns').select('*').eq('id', campaignId).maybeSingle(),
     supabase.from('players').select('*').eq('campaign_id', campaignId).order('seat'),
     supabase.from('log_entries').select('*').eq('campaign_id', campaignId).order('id'),
+    supabase.from('nudges').select('*').eq('campaign_id', campaignId).order('id'),
   ]);
   return {
     campaign: unwrap(campaign) as Campaign | null,
     players: unwrap(players) as Player[],
     log: unwrap(log) as LogEntry[],
+    nudges: unwrap(nudges) as Nudge[],
   };
 }
 
@@ -92,12 +102,16 @@ type Handlers = {
   onCampaign: (c: Campaign) => void;
   onPlayer: (p: Player) => void;
   onLog: (e: LogEntry) => void;
+  onNudge: (n: Nudge) => void;
+  // Player ids with the campaign open right now.
+  onOnline: (playerIds: Set<string>) => void;
 };
 
-// Live updates for one campaign. Returns an unsubscribe function.
-export function watchCampaign(campaignId: string, h: Handlers) {
+// Live updates for one campaign, plus presence for this player.
+// Returns an unsubscribe function.
+export function watchCampaign(campaignId: string, myPlayerId: string | undefined, h: Handlers) {
   const channel = supabase
-    .channel(`campaign:${campaignId}`)
+    .channel(`campaign:${campaignId}`, { config: { presence: { key: myPlayerId ?? '' } } })
     .on(
       'postgres_changes',
       { event: '*', schema: 'public', table: 'campaigns', filter: `id=eq.${campaignId}` },
@@ -113,7 +127,17 @@ export function watchCampaign(campaignId: string, h: Handlers) {
       { event: 'INSERT', schema: 'public', table: 'log_entries', filter: `campaign_id=eq.${campaignId}` },
       (p) => h.onLog(p.new as LogEntry),
     )
-    .subscribe();
+    .on(
+      'postgres_changes',
+      { event: 'INSERT', schema: 'public', table: 'nudges', filter: `campaign_id=eq.${campaignId}` },
+      (p) => h.onNudge(p.new as Nudge),
+    )
+    .on('presence', { event: 'sync' }, () => {
+      h.onOnline(new Set(Object.keys(channel.presenceState()).filter(Boolean)));
+    })
+    .subscribe((status) => {
+      if (status === 'SUBSCRIBED' && myPlayerId) channel.track({ at: Date.now() });
+    });
   return () => {
     supabase.removeChannel(channel);
   };
