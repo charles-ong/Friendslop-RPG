@@ -26,7 +26,7 @@ npm run dev
    the same way, then
    [`supabase/migrations/20261007020000_setting.sql`](supabase/migrations/20261007020000_setting.sql).
 4. **Groq key:** Edge Functions → Secrets → add `GROQ_API_KEY`. Optionally add `GROQ_MODEL`
-   (defaults to `llama-3.3-70b-versatile`).
+   (tried first; otherwise `openai/gpt-oss-120b`, then other Groq models your key can use).
 5. **Gamemaster function:** create a personal access token at
    [supabase.com/dashboard/account/tokens](https://supabase.com/dashboard/account/tokens) and save it
    as a GitHub repository secret named `SUPABASE_ACCESS_TOKEN`. The
