@@ -3,12 +3,15 @@
 //   begin             host, in the lobby: write the opening scene and start
 //   turn (default)    current player: narrate their action and pass the turn
 //   vapid_public_key  anyone signed in: the key browsers need to subscribe to Web Push
-//   nudge_push        after the `nudge` RPC: push that nudge to its target
+//   nudge_push        after the `nudge` RPC: notify that nudge's target
+//   test_notify       anyone signed in: send themselves a test, report what happened
 //
-// Whenever the turn passes to someone, they get a Web Push notification.
-// The VAPID keys for that are created on first use and kept in app_secrets.
+// Whenever the turn passes to someone, or they're nudged, they get a Web Push
+// notification, plus an email if they left an address and aren't on the site.
+// The VAPID keys for push are created on first use and kept in app_secrets.
 //
-// Secrets: GROQ_API_KEY (required), GROQ_MODEL (optional, tried first).
+// Secrets: GROQ_API_KEY (required), GROQ_MODEL (optional, tried first),
+// BREVO_API_KEY and BREVO_SENDER (optional, for email), SITE_URL (optional).
 
 import { createClient } from 'npm:@supabase/supabase-js@2';
 import {
@@ -29,6 +32,9 @@ const GROQ_MODELS = [
   'llama-3.3-70b-versatile',
 ].filter((m, i, all): m is string => !!m && all.indexOf(m) === i);
 const HISTORY_LIMIT = 30;
+const SITE_URL = Deno.env.get('SITE_URL') ?? 'https://charles-ong.github.io/Friendslop-RPG/';
+// Someone seen this recently has the site open, so an email would be noise.
+const EMAIL_IF_AWAY_MS = 2 * 60_000;
 
 const cors = {
   'Access-Control-Allow-Origin': '*',
@@ -325,7 +331,7 @@ async function takeTurn(campaignId: string, userId: string, action: string, resu
   }
 }
 
-// --- Web Push -------------------------------------------------------------
+// --- Notifications: Web Push and email -------------------------------------------------------------
 
 let appServer: Promise<{ server: ApplicationServer; publicKey: string }> | null = null;
 
@@ -355,19 +361,21 @@ function getAppServer() {
 }
 
 // `url` is a hash route; the service worker resolves it against the site.
-type PushMessage = { title: string; body: string; url: string; tag: string };
+type Notice = { title: string; body: string; url: string; tag: string };
 
-// Best-effort: a failed push never fails the request that triggered it.
-async function pushToUser(userId: string, message: PushMessage) {
+// Best-effort: a failed notification never fails the request that triggered it.
+// Each returns a short report, which test_notify shows to the player.
+async function pushToUser(userId: string, message: Notice): Promise<string> {
   try {
-    const { data: subs } = await admin
+    const { data: subs, error } = await admin
       .from('push_subscriptions')
       .select('endpoint, p256dh, auth')
       .eq('user_id', userId);
-    if (!subs?.length) return;
+    if (error) throw error;
+    if (!subs?.length) return 'no device has notifications turned on';
 
     const { server } = await getAppServer();
-    await Promise.all(
+    const results = await Promise.all(
       subs.map(async (s) => {
         try {
           const subscriber = server.subscribe({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } });
@@ -376,18 +384,73 @@ async function pushToUser(userId: string, message: PushMessage) {
             ttl: 60 * 60 * 24,
             topic: message.tag.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32),
           });
+          return null;
         } catch (e) {
           if (e instanceof PushMessageError && (e.isGone() || e.response.status === 404)) {
             await admin.from('push_subscriptions').delete().eq('endpoint', s.endpoint);
-          } else {
-            console.error('push failed', e);
+            return 'a device had expired and was removed';
           }
+          console.error('push failed', e);
+          const status = e instanceof PushMessageError ? ` ${e.response.status}` : '';
+          return `push service error${status}: ${String((e as Error)?.message ?? e).slice(0, 120)}`;
         }
       }),
     );
+    const failures = results.filter((r): r is string => !!r);
+    const sent = results.length - failures.length;
+    return [sent ? `sent to ${sent} device${sent === 1 ? '' : 's'}` : '', ...failures].filter(Boolean).join('; ');
   } catch (e) {
     console.error('push skipped', e);
+    return `couldn't push: ${explain(e, 'unexpected error')}`;
   }
+}
+
+async function emailToUser(userId: string, message: Notice): Promise<string> {
+  const apiKey = Deno.env.get('BREVO_API_KEY');
+  const sender = Deno.env.get('BREVO_SENDER');
+  if (!apiKey || !sender) return 'email isn\'t set up on the server yet';
+  try {
+    const { data, error } = await admin.from('notify_emails').select('email').eq('user_id', userId).maybeSingle();
+    if (error) throw error;
+    if (!data) return 'no email address saved';
+
+    const link = new URL(message.url, SITE_URL).href;
+    const res = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST',
+      headers: { 'api-key': apiKey, 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({
+        sender: { email: sender, name: 'Friendslop RPG' },
+        to: [{ email: data.email }],
+        subject: message.title,
+        textContent: `${message.body}\n\nJump back in: ${link}\n\n(You get this because you left your email in Friendslop RPG. Clear it on your campaign page to stop.)`,
+        htmlContent: `<p>${escapeHtml(message.body)}</p><p><a href="${escapeHtml(link)}">Jump back in 🎲</a></p><p style="color:#8a8197;font-size:12px">You get this because you left your email in Friendslop RPG. Clear it on your campaign page to stop.</p>`,
+      }),
+    });
+    if (!res.ok) {
+      const detail = await res.text();
+      console.error('email failed', res.status, detail);
+      return `email service error ${res.status}: ${detail.slice(0, 160)}`;
+    }
+    return `emailed ${data.email}`;
+  } catch (e) {
+    console.error('email skipped', e);
+    return `couldn't email: ${explain(e, 'unexpected error')}`;
+  }
+}
+
+function escapeHtml(text: string) {
+  return text.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+}
+
+async function notifyPlayer(playerId: string, message: Notice) {
+  const { data: player } = await admin
+    .from('players')
+    .select('user_id, last_seen_at')
+    .eq('id', playerId)
+    .maybeSingle();
+  if (!player) return;
+  const away = !player.last_seen_at || Date.now() - Date.parse(player.last_seen_at) > EMAIL_IF_AWAY_MS;
+  await Promise.all([pushToUser(player.user_id, message), away ? emailToUser(player.user_id, message) : null]);
 }
 
 async function pushTurn(campaignId: string) {
@@ -397,15 +460,10 @@ async function pushTurn(campaignId: string) {
     .eq('id', campaignId)
     .maybeSingle();
   if (!campaign?.current_player_id) return;
-  const { data: player } = await admin
-    .from('players')
-    .select('user_id, name')
-    .eq('id', campaign.current_player_id)
-    .maybeSingle();
-  if (!player) return;
-  await pushToUser(player.user_id, {
+  const { data: player } = await admin.from('players').select('name').eq('id', campaign.current_player_id).maybeSingle();
+  await notifyPlayer(campaign.current_player_id, {
     title: `Your turn in ${campaign.name} 🎲`,
-    body: `${player.name}, the party is waiting on you.`,
+    body: `${player?.name ?? 'Adventurer'}, the party is waiting on you.`,
     url: `#/c/${campaignId}`,
     tag: `turn-${campaignId}`,
   });
@@ -420,7 +478,7 @@ async function pushNudge(campaignId: string, userId: string) {
     .maybeSingle();
   if (!sender) return;
 
-  // Claim this sender's newest unpushed nudge, so each nudge pushes at most once.
+  // Claim this sender's newest unsent nudge, so each nudge notifies at most once.
   const { data: latest } = await admin
     .from('nudges')
     .select('id')
@@ -439,18 +497,25 @@ async function pushNudge(campaignId: string, userId: string) {
     .select('to_player')
     .maybeSingle();
   if (!claimed) return;
-  const [{ data: target }, { data: campaign }] = await Promise.all([
-    admin.from('players').select('user_id').eq('id', claimed.to_player).maybeSingle(),
-    admin.from('campaigns').select('name').eq('id', campaignId).maybeSingle(),
-  ]);
-  if (!target) return;
+  const { data: campaign } = await admin.from('campaigns').select('name').eq('id', campaignId).maybeSingle();
 
-  await pushToUser(target.user_id, {
+  await notifyPlayer(claimed.to_player, {
     title: `${sender.name} nudged you 👉`,
     body: `It's your turn in ${campaign?.name ?? 'your adventure'}.`,
     url: `#/c/${campaignId}`,
     tag: `turn-${campaignId}`,
   });
+}
+
+async function testNotify(userId: string, campaignId: string | undefined) {
+  const message = {
+    title: 'Test from Friendslop RPG 🎲',
+    body: 'Notifications work! This is what your turn alerts will look like.',
+    url: campaignId ? `#/c/${campaignId}` : '#/',
+    tag: 'friendslop-test',
+  };
+  const [push, email] = await Promise.all([pushToUser(userId, message), emailToUser(userId, message)]);
+  return { push, email };
 }
 
 Deno.serve(async (req) => {
@@ -473,6 +538,7 @@ Deno.serve(async (req) => {
   }
 
   const campaignId = body?.campaign_id as string | undefined;
+  if (body?.type === 'test_notify') return json(await testNotify(auth.user.id, campaignId));
   if (!campaignId) return json({ error: 'Send campaign_id.' }, 400);
 
   if (body.type === 'nudge_push') {

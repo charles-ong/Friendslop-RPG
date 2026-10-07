@@ -79,6 +79,18 @@ export async function vapidPublicKey(): Promise<string> {
   return key;
 }
 
+export async function myEmail(): Promise<string> {
+  return (unwrap(await supabase.rpc('my_email')) as string | null) ?? '';
+}
+
+export async function setMyEmail(email: string): Promise<void> {
+  unwrap(await supabase.rpc('set_my_email', { new_email: email }));
+}
+
+export async function testNotify(campaignId: string): Promise<{ push: string; email: string }> {
+  return gamemaster({ type: 'test_notify', campaign_id: campaignId });
+}
+
 export async function savePushSubscription(sub: PushSubscriptionJSON): Promise<void> {
   unwrap(
     await supabase.rpc('save_push_subscription', {

@@ -26,10 +26,15 @@ npm run dev
    the same way, then
    [`supabase/migrations/20261007020000_setting.sql`](supabase/migrations/20261007020000_setting.sql)
    , [`supabase/migrations/20261007030000_pause_nudge.sql`](supabase/migrations/20261007030000_pause_nudge.sql)
-   and [`supabase/migrations/20261007040000_web_push.sql`](supabase/migrations/20261007040000_web_push.sql).
+   , [`supabase/migrations/20261007040000_web_push.sql`](supabase/migrations/20261007040000_web_push.sql)
+   and [`supabase/migrations/20261007050000_email_notify.sql`](supabase/migrations/20261007050000_email_notify.sql).
 4. **Groq key:** Edge Functions → Secrets → add `GROQ_API_KEY`. Optionally add `GROQ_MODEL`
    (tried first; otherwise `openai/gpt-oss-120b`, then other Groq models your key can use).
-5. **Gamemaster function:** create a personal access token at
+5. **Email notifications (optional):** sign up at [brevo.com](https://www.brevo.com) (free, 300 emails a
+   day), verify the address you'll send from under Senders, and create an API key under SMTP & API.
+   Add Edge Function secrets `BREVO_API_KEY` (the key) and `BREVO_SENDER` (that address).
+   Optionally set `SITE_URL` if the site isn't at `https://charles-ong.github.io/Friendslop-RPG/`.
+6. **Gamemaster function:** create a personal access token at
    [supabase.com/dashboard/account/tokens](https://supabase.com/dashboard/account/tokens) and save it
    as a GitHub repository secret named `SUPABASE_ACCESS_TOKEN`. The
    *Deploy Supabase functions* workflow then deploys `supabase/functions/` on every change
@@ -69,4 +74,7 @@ Every push to `main` then builds and deploys the site.
   arrive with the site closed. Its VAPID keys are generated on first use and stored in the private
   `app_secrets` table; there's nothing to configure. On iPhone, notifications need the site added
   to the home screen first (Share → Add to Home Screen), then turned on from the installed app.
+- Email: players can leave an address in the Notifications card (stored privately, via
+  `set_my_email`). Turn and nudge alerts are emailed through Brevo when the player hasn't been on the
+  site for 2 minutes. "Send me a test" sends a push and an email and shows what happened to each.
 - Invite links look like `…/#/join/ABC234`. Hash routing keeps deep links working on GitHub Pages.
