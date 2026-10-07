@@ -30,6 +30,24 @@ export async function updateMyCharacter(campaignId: string, name: string, charac
   );
 }
 
+// d20 rolled in the browser, as the design calls for. Fine among friends.
+export function rollD20(): number {
+  const buf = new Uint32Array(1);
+  crypto.getRandomValues(buf);
+  return (buf[0] % 20) + 1;
+}
+
+export async function takeTurn(campaignId: string, action: string, roll: number): Promise<void> {
+  const { error } = await supabase.functions.invoke('gamemaster', {
+    body: { campaign_id: campaignId, action, roll },
+  });
+  if (!error) return;
+  // Surface the function's own message when it sent one.
+  const context = (error as { context?: Response }).context;
+  const body = context ? await context.json().catch(() => null) : null;
+  throw new Error(body?.error ?? error.message);
+}
+
 export async function loadCampaign(campaignId: string) {
   const [campaign, players, log] = await Promise.all([
     supabase.from('campaigns').select('*').eq('id', campaignId).maybeSingle(),

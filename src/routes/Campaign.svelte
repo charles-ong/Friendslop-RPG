@@ -1,6 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { loadCampaign, startCampaign, updateMyCharacter, watchCampaign } from '../lib/api';
+  import {
+    loadCampaign,
+    rollD20,
+    startCampaign,
+    takeTurn,
+    updateMyCharacter,
+    watchCampaign,
+  } from '../lib/api';
   import { inviteLink } from '../lib/router.svelte';
   import type { Campaign, LogEntry, Player } from '../lib/types';
 
@@ -16,6 +23,13 @@
   let me = $derived(players.find((p) => p.user_id === userId));
   let isHost = $derived(campaign?.created_by === userId);
   let current = $derived(players.find((p) => p.id === campaign?.current_player_id));
+
+  let myTurn = $derived(campaign?.status === 'active' && !!me && me.id === campaign.current_player_id);
+  let gmBusy = $derived(!!campaign?.gm_busy_since);
+
+  let action = $state('');
+  let rolled = $state<number | null>(null);
+  let acting = $state(false);
 
   let editName = $state('');
   let editCharacter = $state('');
@@ -88,6 +102,22 @@
     }
   }
 
+  async function act(event: SubmitEvent) {
+    event.preventDefault();
+    acting = true;
+    error = '';
+    const roll = rollD20();
+    rolled = roll;
+    try {
+      await takeTurn(id, action.trim(), roll);
+      action = '';
+    } catch (e) {
+      error = (e as Error).message;
+    } finally {
+      acting = false;
+    }
+  }
+
   function nameOf(playerId: string | null) {
     return players.find((p) => p.id === playerId)?.name ?? 'Someone';
   }
@@ -116,6 +146,31 @@
     </div>
     {#if error}<p class="error">{error}</p>{/if}
   </section>
+
+  {#if myTurn}
+    <section class="card turn">
+      <h2>Your turn!</h2>
+      <form onsubmit={act}>
+        <label for="action">What do you do?</label>
+        <textarea
+          id="action"
+          bind:value={action}
+          maxlength="500"
+          rows="3"
+          required
+          disabled={acting}
+          placeholder="I offer the grumpy toad a biscuit."
+        ></textarea>
+        <div class="row">
+          <button disabled={acting || !action.trim()}>🎲 Roll & act</button>
+          {#if rolled !== null}
+            <span class="die" class:crit={rolled === 20} class:fumble={rolled === 1}>{rolled}</span>
+          {/if}
+          {#if acting}<span class="muted">The Gamemaster is narrating…</span>{/if}
+        </div>
+      </form>
+    </section>
+  {/if}
 
   <section class="card">
     <h2>Party <span class="muted">({players.length}/10)</span></h2>
@@ -156,7 +211,9 @@
 
   <section class="card">
     <h2>Adventure log</h2>
-    {#if current && campaign.status === 'active'}
+    {#if gmBusy && !acting}
+      <p class="muted">The Gamemaster is narrating…</p>
+    {:else if current && campaign.status === 'active' && !myTurn}
       <p class="muted">Waiting on {current.name}…</p>
     {/if}
     <ol class="log">
@@ -233,6 +290,34 @@
   }
   .log li:last-child {
     border-bottom: none;
+  }
+  .log li.narration {
+    white-space: pre-wrap;
+  }
+  .turn {
+    border-color: var(--accent);
+  }
+  .die {
+    display: inline-grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    border-radius: 12px;
+    background: var(--soft);
+    font-weight: 800;
+    font-size: 1.1rem;
+    animation: tumble 0.4s ease-out;
+  }
+  .die.crit {
+    background: var(--mint);
+  }
+  .die.fumble {
+    color: var(--danger);
+  }
+  @keyframes tumble {
+    from {
+      transform: rotate(-200deg) scale(0.6);
+    }
   }
   .log li.system {
     color: var(--muted);

@@ -6,6 +6,7 @@ export type Campaign = {
   status: 'lobby' | 'active' | 'ended';
   turn_number: number;
   current_player_id: string | null;
+  gm_busy_since: string | null;
   created_at: string;
 };
 

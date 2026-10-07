@@ -1,0 +1,4 @@
+# The site uses new-style publishable keys, so the gateway's legacy JWT check
+# is off and the function verifies the caller itself.
+[functions.gamemaster]
+verify_jwt = false
