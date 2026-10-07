@@ -134,6 +134,21 @@ async function narrate(messages: { role: string; content: string }[]) {
   };
 }
 
+// Turn a failure into something the players (or the host setting things up) can act on.
+function explain(e: unknown, fallback: string): string {
+  const message = String((e as { message?: unknown })?.message ?? e);
+  if (message.startsWith('Only the host')) return message;
+  if (message.includes('Could not find the function') || message.includes('does not exist')) {
+    return 'The database is missing an update. Run the newest SQL file in supabase/migrations.';
+  }
+  if (message.startsWith('Groq 401') || !Deno.env.get('GROQ_API_KEY')) {
+    return 'The Groq API key is missing or invalid. Check the GROQ_API_KEY secret in Supabase.';
+  }
+  if (message.startsWith('Groq 429')) return 'Groq is rate limiting us. Wait a minute and try again.';
+  if (message.startsWith('Groq ')) return `Groq returned an error (${message.slice(5, 8)}). Please try again.`;
+  return fallback;
+}
+
 function partyLines(players: Player[]) {
   return players
     .map((p) => `- ${p.name}${p.character ? `: ${p.character}` : ''}`)
@@ -258,7 +273,7 @@ async function takeTurn(campaignId: string, userId: string, action: string, resu
   } catch (e) {
     console.error(e);
     await admin.rpc('abort_turn', { cid: campaignId, action_entry_id: actionId });
-    return json({ error: 'The Gamemaster lost their notes. Please try again.' }, 502);
+    return json({ error: explain(e, 'The Gamemaster lost their notes. Please try again.') }, 502);
   }
 }
 
@@ -285,8 +300,7 @@ Deno.serve(async (req) => {
       );
     } catch (e) {
       console.error(e);
-      const message = (e as Error).message;
-      return json({ error: message.startsWith('Only the host') ? message : 'The Gamemaster got distracted. Please try again.' }, 502);
+      return json({ error: explain(e, 'The Gamemaster got distracted. Please try again.') }, 502);
     }
   }
 
