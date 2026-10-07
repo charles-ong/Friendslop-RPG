@@ -3,11 +3,17 @@
 //   begin             host, in the lobby: write the opening scene and start
 //   turn (default)    current player: narrate their action and pass the turn
 //
-// Secrets: GROQ_API_KEY (required), GROQ_MODEL (optional).
+// Secrets: GROQ_API_KEY (required), GROQ_MODEL (optional, tried first).
 
 import { createClient } from 'npm:@supabase/supabase-js@2';
 
-const GROQ_MODEL = Deno.env.get('GROQ_MODEL') ?? 'llama-3.3-70b-versatile';
+// Tried in order; a model the key can't use (404) falls through to the next.
+const GROQ_MODELS = [
+  Deno.env.get('GROQ_MODEL'),
+  'openai/gpt-oss-120b',
+  'openai/gpt-oss-20b',
+  'llama-3.3-70b-versatile',
+].filter((m, i, all): m is string => !!m && all.indexOf(m) === i);
 const HISTORY_LIMIT = 30;
 
 const cors = {
@@ -103,24 +109,37 @@ The next player is ${next.name}.`;
 }
 
 async function chat(messages: { role: string; content: string }[], maxTokens = 700) {
-  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${Deno.env.get('GROQ_API_KEY')}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: GROQ_MODEL,
-      messages,
-      temperature: 0.9,
-      max_tokens: maxTokens,
-      response_format: { type: 'json_object' },
-    }),
-  });
-  if (!res.ok) throw new Error(`Groq ${res.status}: ${await res.text()}`);
+  let lastError = '';
+  for (const model of GROQ_MODELS) {
+    // gpt-oss models reason before answering; keep that short and out of the reply.
+    const reasoning = model.startsWith('openai/gpt-oss')
+      ? { reasoning_effort: 'low', include_reasoning: false }
+      : {};
+    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${Deno.env.get('GROQ_API_KEY')}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model,
+        messages,
+        temperature: 0.9,
+        max_completion_tokens: reasoning.reasoning_effort ? maxTokens + 1500 : maxTokens,
+        response_format: { type: 'json_object' },
+        ...reasoning,
+      }),
+    });
+    if (res.status === 404) {
+      lastError = `Groq 404: ${await res.text()}`;
+      continue;
+    }
+    if (!res.ok) throw new Error(`Groq ${res.status}: ${await res.text()}`);
 
-  const data = await res.json();
-  return JSON.parse(data.choices[0].message.content);
+    const data = await res.json();
+    return JSON.parse(data.choices[0].message.content);
+  }
+  throw new Error(lastError);
 }
 
 async function narrate(messages: { role: string; content: string }[]) {
