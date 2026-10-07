@@ -1,0 +1,25 @@
+name: Deploy Supabase functions
+
+on:
+  push:
+    branches: [main]
+    paths: ['supabase/functions/**', 'supabase/config.toml']
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      PROJECT_REF: kcbevbyyowgsmpbizgal
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - name: Deploy
+        if: env.SUPABASE_ACCESS_TOKEN != ''
+        run: supabase functions deploy --project-ref "$PROJECT_REF"
+      - name: Skip (no access token)
+        if: env.SUPABASE_ACCESS_TOKEN == ''
+        run: echo "::notice::Add a SUPABASE_ACCESS_TOKEN repository secret to deploy functions automatically."

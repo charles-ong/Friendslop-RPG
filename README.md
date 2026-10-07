@@ -21,6 +21,16 @@ npm run dev
 2. **Create the schema:** open the SQL Editor, paste
    [`supabase/migrations/20261007000000_init.sql`](supabase/migrations/20261007000000_init.sql),
    and run it.
+3. **Turn loop schema:** run
+   [`supabase/migrations/20261007010000_turn_loop.sql`](supabase/migrations/20261007010000_turn_loop.sql)
+   the same way.
+4. **Groq key:** Edge Functions → Secrets → add `GROQ_API_KEY`. Optionally add `GROQ_MODEL`
+   (defaults to `llama-3.3-70b-versatile`).
+5. **Gamemaster function:** create a personal access token at
+   [supabase.com/dashboard/account/tokens](https://supabase.com/dashboard/account/tokens) and save it
+   as a GitHub repository secret named `SUPABASE_ACCESS_TOKEN`. The
+   *Deploy Supabase functions* workflow then deploys `supabase/functions/` on every change
+   (or run it by hand from the Actions tab).
 
 The project URL and publishable key live in [`src/lib/config.ts`](src/lib/config.ts).
 They're safe to publish; row level security keeps each party's data private.
@@ -36,5 +46,9 @@ Every push to `main` then builds and deploys the site.
 - Everyone signs in anonymously, so `auth.uid()` identifies a browser.
 - Clients only **read** tables directly. Every write goes through a database function
   (`create_campaign`, `join_campaign`, `start_campaign`, `update_my_character`) or, for
-  narration, the Gamemaster edge function.
+  turns, the Gamemaster edge function.
+- A turn: the current player writes an action and rolls a d20 in the browser. The `gamemaster`
+  function checks it's their turn (`begin_turn`), sends the party, recent log, action and roll
+  to Groq, then saves the narration, applies any HP changes and passes the turn to the next seat
+  (`finish_turn`). If Groq fails, `abort_turn` undoes the action so the player can retry.
 - Invite links look like `…/#/join/ABC234`. Hash routing keeps deep links working on GitHub Pages.
