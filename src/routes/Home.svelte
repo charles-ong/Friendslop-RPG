@@ -1,9 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { createCampaign, myCampaigns } from '../lib/api';
+  import { createCampaign, myCampaigns, type CampaignSummary } from '../lib/api';
   import { go } from '../lib/router.svelte';
   import { saveName, savedName } from '../lib/prefs';
-  import type { Campaign } from '../lib/types';
 
   let { userId }: { userId: string } = $props();
 
@@ -12,7 +11,7 @@
   let joinCode = $state('');
   let busy = $state(false);
   let error = $state('');
-  let campaigns = $state<Campaign[]>([]);
+  let campaigns = $state<CampaignSummary[]>([]);
 
   onMount(async () => {
     try {
@@ -49,8 +48,20 @@
     <ul class="list">
       {#each campaigns as c (c.id)}
         <li>
-          <a href={`#/c/${c.id}`}>{c.name}</a>
-          <span class="muted">· {c.status}</span>
+          <a href={`#/c/${c.id}`} class:mine={c.myTurn}>
+            <span class="name">{c.name}</span>
+            <span class="state">
+              {#if c.myTurn}
+                <span class="pill">🎲 Your turn!</span>
+              {:else if c.status === 'active'}
+                <span class="muted">Waiting on {c.currentName ?? 'someone'}</span>
+              {:else if c.status === 'lobby'}
+                <span class="muted">Gathering the party · {c.partySize} joined</span>
+              {:else}
+                <span class="muted">Ended</span>
+              {/if}
+            </span>
+          </a>
         </li>
       {/each}
     </ul>
@@ -97,11 +108,35 @@
     padding: 0;
     margin: 0;
   }
-  .list li {
-    padding: 6px 0;
+  .list li + li {
+    margin-top: 8px;
   }
   .list a {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 10px 14px;
+    border-radius: 14px;
+    background: var(--bg);
     color: inherit;
+    text-decoration: none;
+  }
+  .list a.mine {
+    background: var(--soft);
+  }
+  .name {
     font-weight: 700;
+  }
+  .state {
+    font-size: 0.9rem;
+  }
+  .pill {
+    display: inline-block;
+    background: var(--accent);
+    color: var(--accent-ink);
+    border-radius: 999px;
+    padding: 0 10px;
+    font-weight: 700;
+    font-size: 0.85rem;
   }
 </style>
