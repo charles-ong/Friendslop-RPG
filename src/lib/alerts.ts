@@ -41,10 +41,12 @@ export async function enableAlerts(): Promise<boolean> {
 
 // Make sure this browser's push subscription is saved for the signed-in
 // player. Safe to call on every visit once notifications are allowed.
-export async function subscribeToPush(): Promise<boolean> {
+// Returns what went wrong, or null when it worked.
+export async function subscribeToPush(): Promise<string | null> {
   try {
     const reg = await registration;
-    if (!reg || !('PushManager' in window) || !alertsEnabled()) return false;
+    if (!reg || !('PushManager' in window)) return "this browser can't receive push notifications";
+    if (!alertsEnabled()) return 'notifications are blocked for this site in the browser settings';
     await navigator.serviceWorker.ready;
     let sub = await reg.pushManager.getSubscription();
     if (!sub) {
@@ -54,10 +56,13 @@ export async function subscribeToPush(): Promise<boolean> {
       });
     }
     await savePushSubscription(sub.toJSON());
-    return true;
+    return null;
   } catch (e) {
     console.warn('Push notifications unavailable', e);
-    return false;
+    const message = (e as Error)?.message || String(e);
+    return /permission denied/i.test(message)
+      ? 'the browser refused to set up push. Check notifications are allowed for this browser in your system settings'
+      : message;
   }
 }
 

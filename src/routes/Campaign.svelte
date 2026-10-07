@@ -11,7 +11,8 @@
   import { inviteLink } from '../lib/router.svelte';
   import SettingPicker from './SettingPicker.svelte';
   import TurnStatus from './TurnStatus.svelte';
-  import { alertsEnabled, alertsSupported, enableAlerts, needsHomeScreen, notify, subscribeToPush } from '../lib/alerts';
+  import { alertsEnabled, alertsSupported, enableAlerts, notify, subscribeToPush } from '../lib/alerts';
+  import Notifications from './Notifications.svelte';
   import { ago } from '../lib/time';
   import type { Campaign, LogEntry, Nudge, Player } from '../lib/types';
 
@@ -262,12 +263,7 @@
   {#if me && alertsSupported() && !alertsOn && campaign.status !== 'ended'}
     <p class="alerts muted">
       <button class="link" onclick={turnOnAlerts}>Turn on notifications</button> to hear when it's your turn,
-      even with this page closed.
-    </p>
-  {:else if me && needsHomeScreen() && campaign.status !== 'ended'}
-    <p class="alerts muted">
-      To get a ping when it's your turn on iPhone, tap Share → <strong>Add to Home Screen</strong>, then open
-      Friendslop from there and turn on notifications.
+      even with this page closed, or add your email under Notifications.
     </p>
   {/if}
 
@@ -316,6 +312,10 @@
         <button disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
       </form>
     </section>
+
+    {#if campaign.status !== 'ended'}
+      <Notifications campaignId={id} bind:alertsOn />
+    {/if}
   {/if}
 
   <section class="card">
