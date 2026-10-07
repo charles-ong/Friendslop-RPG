@@ -3,12 +3,12 @@
   import {
     loadCampaign,
     rollD20,
-    startCampaign,
     takeTurn,
     updateMyCharacter,
     watchCampaign,
   } from '../lib/api';
   import { inviteLink } from '../lib/router.svelte';
+  import SettingPicker from './SettingPicker.svelte';
   import type { Campaign, LogEntry, Player } from '../lib/types';
 
   let { id, userId }: { id: string; userId: string } = $props();
@@ -23,6 +23,7 @@
   let me = $derived(players.find((p) => p.user_id === userId));
   let isHost = $derived(campaign?.created_by === userId);
   let current = $derived(players.find((p) => p.id === campaign?.current_player_id));
+  let host = $derived(players.find((p) => p.user_id === campaign?.created_by));
 
   let myTurn = $derived(campaign?.status === 'active' && !!me && me.id === campaign.current_player_id);
   let gmBusy = $derived(!!campaign?.gm_busy_since);
@@ -30,6 +31,7 @@
   let action = $state('');
   let rolled = $state<number | null>(null);
   let acting = $state(false);
+  let turnError = $state('');
 
   let editName = $state('');
   let editCharacter = $state('');
@@ -93,26 +95,17 @@
     }
   }
 
-  async function start() {
-    error = '';
-    try {
-      await startCampaign(id);
-    } catch (e) {
-      error = (e as Error).message;
-    }
-  }
-
   async function act(event: SubmitEvent) {
     event.preventDefault();
     acting = true;
-    error = '';
+    turnError = '';
     const roll = rollD20();
     rolled = roll;
     try {
       await takeTurn(id, action.trim(), roll);
       action = '';
     } catch (e) {
-      error = (e as Error).message;
+      turnError = (e as Error).message;
     } finally {
       acting = false;
     }
@@ -138,14 +131,20 @@
       <span class="pill">{campaign.status === 'lobby' ? 'Gathering the party' : `Turn ${campaign.turn_number}`}</span>
       <span class="muted">Code <span class="code">{campaign.code}</span></span>
     </div>
+    {#if campaign.setting}<p class="setting">{campaign.setting}</p>{/if}
     <div class="row" style="margin-top: 12px">
       <button class="ghost" onclick={copyInvite}>{copied ? 'Link copied!' : 'Invite friends'}</button>
-      {#if isHost && campaign.status === 'lobby'}
-        <button onclick={start} disabled={players.length < 1}>Start adventure</button>
-      {/if}
     </div>
     {#if error}<p class="error">{error}</p>{/if}
   </section>
+
+  {#if campaign.status === 'lobby'}
+    {#if isHost}
+      <SettingPicker campaignId={id} />
+    {:else}
+      <p class="muted">Waiting for {host?.name ?? 'the host'} to choose a setting and begin…</p>
+    {/if}
+  {/if}
 
   {#if myTurn}
     <section class="card turn">
@@ -168,6 +167,7 @@
           {/if}
           {#if acting}<span class="muted">The Gamemaster is narrating…</span>{/if}
         </div>
+        {#if turnError}<p class="error">{turnError}</p>{/if}
       </form>
     </section>
   {/if}
@@ -236,6 +236,10 @@
     padding: 2px 10px;
     font-size: 0.85rem;
     font-weight: 700;
+  }
+  .setting {
+    margin: 8px 0 0;
+    font-size: 0.95rem;
   }
   .pill.small {
     font-size: 0.75rem;

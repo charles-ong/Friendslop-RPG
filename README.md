@@ -23,7 +23,8 @@ npm run dev
    and run it.
 3. **Turn loop schema:** run
    [`supabase/migrations/20261007010000_turn_loop.sql`](supabase/migrations/20261007010000_turn_loop.sql)
-   the same way.
+   the same way, then
+   [`supabase/migrations/20261007020000_setting.sql`](supabase/migrations/20261007020000_setting.sql).
 4. **Groq key:** Edge Functions → Secrets → add `GROQ_API_KEY`. Optionally add `GROQ_MODEL`
    (defaults to `llama-3.3-70b-versatile`).
 5. **Gamemaster function:** create a personal access token at
@@ -47,6 +48,9 @@ Every push to `main` then builds and deploys the site.
 - Clients only **read** tables directly. Every write goes through a database function
   (`create_campaign`, `join_campaign`, `start_campaign`, `update_my_character`) or, for
   turns, the Gamemaster edge function.
+- Starting: in the lobby the host asks the Gamemaster for three setting ideas (or writes their own);
+  picking one has the Gamemaster write an opening scene, and `begin_campaign` saves it and gives
+  seat 1 the first turn.
 - A turn: the current player writes an action and rolls a d20 in the browser. The `gamemaster`
   function checks it's their turn (`begin_turn`), sends the party, recent log, action and roll
   to Groq, then saves the narration, applies any HP changes and passes the turn to the next seat
