@@ -135,18 +135,31 @@ async function narrate(messages: { role: string; content: string }[]) {
 }
 
 // Turn a failure into something the players (or the host setting things up) can act on.
+// Unrecognised errors keep a short detail so setup problems can be diagnosed.
 function explain(e: unknown, fallback: string): string {
   const message = String((e as { message?: unknown })?.message ?? e);
   if (message.startsWith('Only the host')) return message;
-  if (message.includes('Could not find the function') || message.includes('does not exist')) {
-    return 'The database is missing an update. Run the newest SQL file in supabase/migrations.';
-  }
-  if (message.startsWith('Groq 401') || !Deno.env.get('GROQ_API_KEY')) {
+
+  if (!Deno.env.get('GROQ_API_KEY') || message.startsWith('Groq 401')) {
     return 'The Groq API key is missing or invalid. Check the GROQ_API_KEY secret in Supabase.';
   }
   if (message.startsWith('Groq 429')) return 'Groq is rate limiting us. Wait a minute and try again.';
-  if (message.startsWith('Groq ')) return `Groq returned an error (${message.slice(5, 8)}). Please try again.`;
-  return fallback;
+  if (message.startsWith('Groq ')) {
+    const status = message.slice(5, 8);
+    let detail = '';
+    try {
+      detail = JSON.parse(message.slice(message.indexOf('{'))).error?.message ?? '';
+    } catch {
+      // not JSON
+    }
+    return `Groq returned an error (${status})${detail ? `: ${detail}` : ''}`.slice(0, 300);
+  }
+
+  const code = (e as { code?: unknown })?.code;
+  if (code === 'PGRST202' || message.includes('schema cache')) {
+    return 'The database is missing an update. Run the newest SQL file in supabase/migrations.';
+  }
+  return `${fallback} (${message.slice(0, 200)})`;
 }
 
 function partyLines(players: Player[]) {
