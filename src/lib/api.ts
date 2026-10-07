@@ -79,6 +79,14 @@ export async function vapidPublicKey(): Promise<string> {
   return key;
 }
 
+export async function skipTurn(campaignId: string): Promise<void> {
+  await gamemaster({ type: 'skip', campaign_id: campaignId });
+}
+
+export async function removePlayer(campaignId: string, playerId: string): Promise<void> {
+  await gamemaster({ type: 'remove_player', campaign_id: campaignId, player_id: playerId });
+}
+
 export async function myEmail(): Promise<string> {
   return (unwrap(await supabase.rpc('my_email')) as string | null) ?? '';
 }
@@ -116,7 +124,10 @@ export async function loadCampaign(campaignId: string) {
   };
 }
 
-export async function myCampaigns(userId: string): Promise<Campaign[]> {
+export type CampaignSummary = Campaign & { currentName: string | null; myTurn: boolean; partySize: number };
+
+// The player's campaigns, with whose turn it is. Your turn first.
+export async function myCampaigns(userId: string): Promise<CampaignSummary[]> {
   const rows = unwrap(
     await supabase
       .from('players')
@@ -124,12 +135,37 @@ export async function myCampaigns(userId: string): Promise<Campaign[]> {
       .eq('user_id', userId)
       .order('joined_at', { ascending: false }),
   ) as unknown as { campaigns: Campaign | null }[];
-  return rows.map((r) => r.campaigns).filter((c): c is Campaign => c !== null);
+  const campaigns = rows.map((r) => r.campaigns).filter((c): c is Campaign => c !== null);
+  if (!campaigns.length) return [];
+
+  const party = unwrap(
+    await supabase
+      .from('players')
+      .select('id, user_id, name, campaign_id')
+      .in(
+        'campaign_id',
+        campaigns.map((c) => c.id),
+      ),
+  ) as Pick<Player, 'id' | 'user_id' | 'name' | 'campaign_id'>[];
+
+  const rank = (c: CampaignSummary) => (c.myTurn ? 0 : c.status === 'active' ? 1 : c.status === 'lobby' ? 2 : 3);
+  return campaigns
+    .map((c) => {
+      const current = party.find((p) => p.id === c.current_player_id);
+      return {
+        ...c,
+        currentName: current?.name ?? null,
+        myTurn: c.status === 'active' && current?.user_id === userId,
+        partySize: party.filter((p) => p.campaign_id === c.id).length,
+      };
+    })
+    .sort((a, b) => rank(a) - rank(b));
 }
 
 type Handlers = {
   onCampaign: (c: Campaign) => void;
   onPlayer: (p: Player) => void;
+  onPlayerGone: (playerId: string) => void;
   onLog: (e: LogEntry) => void;
   onNudge: (n: Nudge) => void;
   // Player ids with the campaign open right now.
@@ -148,8 +184,18 @@ export function watchCampaign(campaignId: string, myPlayerId: string | undefined
     )
     .on(
       'postgres_changes',
-      { event: '*', schema: 'public', table: 'players', filter: `campaign_id=eq.${campaignId}` },
+      { event: 'INSERT', schema: 'public', table: 'players', filter: `campaign_id=eq.${campaignId}` },
       (p) => h.onPlayer(p.new as Player),
+    )
+    .on(
+      'postgres_changes',
+      { event: 'UPDATE', schema: 'public', table: 'players', filter: `campaign_id=eq.${campaignId}` },
+      (p) => h.onPlayer(p.new as Player),
+    )
+    // Deletes can't be filtered by campaign, so this hears every party's;
+    // it only carries the id, and unknown ids are ignored.
+    .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'players' }, (p) =>
+      h.onPlayerGone((p.old as { id: string }).id),
     )
     .on(
       'postgres_changes',

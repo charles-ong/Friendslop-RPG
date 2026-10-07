@@ -10,6 +10,8 @@
     gmBusy,
     nudges,
     now,
+    canSkip = false,
+    onSkip,
   }: {
     campaignId: string;
     current: Player;
@@ -17,6 +19,8 @@
     gmBusy: boolean;
     nudges: Nudge[];
     now: number;
+    canSkip?: boolean;
+    onSkip?: () => void;
   } = $props();
 
   let sending = $state(false);
@@ -56,6 +60,9 @@
       <button class="ghost" onclick={poke} disabled={sending || sent}>
         {sent ? 'Nudged! 👉' : `👉 Nudge ${current.name}`}
       </button>
+      {#if canSkip && onSkip}
+        <button class="ghost" onclick={onSkip}>⏭ Skip turn</button>
+      {/if}
       {#if nudges.length}
         <span class="muted small">Nudged {nudges.length} {nudges.length === 1 ? 'time' : 'times'} this turn</span>
       {/if}
@@ -70,6 +77,9 @@
   }
   .status.paused {
     background: var(--soft);
+  }
+  .status.paused :global(button.ghost) {
+    background: var(--card);
   }
   .title {
     font-weight: 800;

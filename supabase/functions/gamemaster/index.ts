@@ -5,6 +5,8 @@
 //   vapid_public_key  anyone signed in: the key browsers need to subscribe to Web Push
 //   nudge_push        after the `nudge` RPC: notify that nudge's target
 //   test_notify       anyone signed in: send themselves a test, report what happened
+//   skip              host (or the current player): pass the turn to the next seat
+//   remove_player     host: remove a player, passing the turn on if it was theirs
 //
 // Whenever the turn passes to someone, or they're nudged, they get a Web Push
 // notification, plus an email if they left an address and aren't on the site.
@@ -540,6 +542,21 @@ Deno.serve(async (req) => {
   const campaignId = body?.campaign_id as string | undefined;
   if (body?.type === 'test_notify') return json(await testNotify(auth.user.id, campaignId));
   if (!campaignId) return json({ error: 'Send campaign_id.' }, 400);
+
+  if (body.type === 'skip' || body.type === 'remove_player') {
+    const { data: moved, error } =
+      body.type === 'skip'
+        ? await admin.rpc('skip_turn', { cid: campaignId, uid: auth.user.id }).then((r) => ({ ...r, data: true }))
+        : await admin.rpc('remove_player', { cid: campaignId, uid: auth.user.id, pid: String(body.player_id ?? '') });
+    if (error) {
+      console.error(error);
+      const code = (error as { code?: string }).code;
+      // P0001 is a `raise exception` with a message meant for players.
+      return json({ error: code === 'P0001' ? error.message : explain(error, 'That didn\'t work.') }, 409);
+    }
+    if (moved) await pushTurn(campaignId);
+    return json({ ok: true });
+  }
 
   if (body.type === 'nudge_push') {
     await pushNudge(campaignId, auth.user.id);

@@ -27,7 +27,8 @@ npm run dev
    [`supabase/migrations/20261007020000_setting.sql`](supabase/migrations/20261007020000_setting.sql)
    , [`supabase/migrations/20261007030000_pause_nudge.sql`](supabase/migrations/20261007030000_pause_nudge.sql)
    , [`supabase/migrations/20261007040000_web_push.sql`](supabase/migrations/20261007040000_web_push.sql)
-   and [`supabase/migrations/20261007050000_email_notify.sql`](supabase/migrations/20261007050000_email_notify.sql).
+   , [`supabase/migrations/20261007050000_email_notify.sql`](supabase/migrations/20261007050000_email_notify.sql)
+   and [`supabase/migrations/20261007060000_host_controls.sql`](supabase/migrations/20261007060000_host_controls.sql).
 4. **Groq key:** Edge Functions → Secrets → add `GROQ_API_KEY`. Optionally add `GROQ_MODEL`
    (tried first; otherwise `openai/gpt-oss-120b`, then other Groq models your key can use).
 5. **Email notifications (optional):** sign up at [brevo.com](https://www.brevo.com) (free, 300 emails a
@@ -77,4 +78,7 @@ Every push to `main` then builds and deploys the site.
 - Email: players can leave an address in the Notifications card (stored privately, via
   `set_my_email`). Turn and nudge alerts are emailed through Brevo when the player hasn't been on the
   site for 2 minutes. "Send me a test" sends a push and an email and shows what happened to each.
+- Host controls: the host can skip whoever's turn it is or remove a player (the ✕ in the party
+  list), and the current player can pass their own turn. These go through the `gamemaster`
+  function (`skip_turn`, `remove_player`), which notifies whoever's turn it becomes.
 - Invite links look like `…/#/join/ABC234`. Hash routing keeps deep links working on GitHub Pages.

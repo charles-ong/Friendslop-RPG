@@ -1,9 +1,11 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import {
     loadCampaign,
     markSeen,
+    removePlayer,
     rollD20,
+    skipTurn,
     takeTurn,
     updateMyCharacter,
     watchCampaign,
@@ -29,6 +31,16 @@
   let loading = $state(true);
   let error = $state('');
   let copied = $state(false);
+  let removed = $state(false);
+  // Long logs show the latest entries first; "Show earlier" reveals more.
+  const LOG_PAGE = 40;
+  let logShown = $state(LOG_PAGE);
+  let visibleLog = $derived(log.slice(Math.max(0, log.length - logShown)));
+  // Where the story meets the turn box. "Jump to latest" scrolls here.
+  let latest = $state<HTMLElement | null>(null);
+  let latestInView = $state(true);
+  // Names of players who left, so their old actions keep a name.
+  const formerNames = new Map<string, string>();
 
   let me = $derived(players.find((p) => p.user_id === userId));
   // You're always online to yourself, even before presence syncs.
@@ -73,7 +85,7 @@
     const seen = () => {
       if (document.visibilityState === 'visible') markSeen(id).catch(() => {});
     };
-    const tick = setInterval(() => {
+    const timer = setInterval(() => {
       now = Date.now();
       seen();
     }, 60_000);
@@ -97,6 +109,8 @@
       }
       if (!alive) return;
       seen();
+      await tick();
+      if (log.length > 3) latest?.scrollIntoView({ block: 'end' });
       // Keeps this browser's push subscription tied to this player.
       if (mine && alertsOn) subscribeToPush();
 
@@ -107,8 +121,20 @@
           if (i === -1) players = [...players, p].sort((a, b) => a.seat - b.seat);
           else players[i] = p;
         },
+        onPlayerGone: (playerId) => {
+          const gone = players.find((p) => p.id === playerId);
+          if (!gone) return;
+          formerNames.set(gone.id, gone.name);
+          players = players.filter((p) => p.id !== playerId);
+          if (gone.user_id === userId) removed = true;
+        },
         onLog: (e) => {
-          if (!log.some((x) => x.id === e.id)) log = [...log, e];
+          if (log.some((x) => x.id === e.id)) return;
+          const follow = latestInView;
+          log = [...log, e];
+          logShown += 1;
+          // Keep up with the story if you were already reading the end of it.
+          if (follow) tick().then(() => latest?.scrollIntoView({ block: 'end', behavior: 'smooth' }));
         },
         onNudge: (n) => {
           if (nudges.some((x) => x.id === n.id)) return;
@@ -125,11 +151,45 @@
 
     return () => {
       alive = false;
-      clearInterval(tick);
+      clearInterval(timer);
       document.removeEventListener('visibilitychange', seen);
       stop();
     };
   });
+
+  $effect(() => {
+    if (!latest) return;
+    const observer = new IntersectionObserver(([entry]) => (latestInView = entry.isIntersecting), {
+      rootMargin: '0px 0px 80px 0px',
+    });
+    observer.observe(latest);
+    return () => observer.disconnect();
+  });
+
+  function jumpToLatest() {
+    latest?.scrollIntoView({ block: 'end', behavior: 'smooth' });
+  }
+
+  let controlError = $state('');
+  async function passTurn() {
+    if (!current || !confirm(myTurn ? 'Pass your turn to the next player?' : `Skip ${current.name}'s turn?`)) return;
+    controlError = '';
+    try {
+      await skipTurn(id);
+    } catch (e) {
+      controlError = (e as Error).message;
+    }
+  }
+
+  async function kick(p: Player) {
+    if (!confirm(`Remove ${p.name} from the party? They can rejoin with the invite link.`)) return;
+    controlError = '';
+    try {
+      await removePlayer(id, p.id);
+    } catch (e) {
+      controlError = (e as Error).message;
+    }
+  }
 
   function showToast(text: string) {
     toast = text;
@@ -183,7 +243,7 @@
   }
 
   function nameOf(playerId: string | null) {
-    return players.find((p) => p.id === playerId)?.name ?? 'Someone';
+    return players.find((p) => p.id === playerId)?.name ?? (playerId && formerNames.get(playerId)) ?? 'Someone';
   }
 </script>
 
@@ -217,6 +277,39 @@
     {/if}
   {/if}
 
+  {#if campaign.status !== 'lobby' || log.length > 1}
+    <section class="card">
+      <h2>Adventure log</h2>
+      {#if log.length > visibleLog.length}
+        <button class="ghost small-btn" onclick={() => (logShown += LOG_PAGE)}>
+          Show earlier ({log.length - visibleLog.length} more)
+        </button>
+      {/if}
+      <ol class="log">
+        {#each visibleLog as e, i (e.id)}
+          {#if e.turn_number > 0 && (i === 0 || visibleLog[i - 1].turn_number !== e.turn_number)}
+            <li class="turn-break" aria-hidden="true"><span>Turn {e.turn_number}</span></li>
+          {/if}
+          <li class={e.kind}>
+            {#if e.kind === 'narration'}<span class="story">{e.content}</span>{:else}
+              {#if e.kind === 'action'}<strong>{nameOf(e.player_id)}:</strong>{/if}
+              {e.content}
+              {#if e.roll}<span class="pill small">🎲 d{e.roll.die} → {e.roll.result}</span>{/if}
+            {/if}
+          </li>
+        {/each}
+      </ol>
+    </section>
+  {/if}
+
+  {#if removed}
+    <section class="card">
+      <h2>You've left this party</h2>
+      <p class="muted">The host removed you. You can rejoin with the invite link if they share it again.</p>
+      <a href="#/">Back home</a>
+    </section>
+  {/if}
+
   {#if myTurn}
     <section class="card turn">
       <h2>Your turn!</h2>
@@ -246,6 +339,8 @@
         </div>
         {#if turnError}<p class="error">{turnError}</p>{/if}
       </form>
+      <button class="link pass" onclick={passTurn} disabled={acting}>Pass my turn</button>
+      {#if controlError}<p class="error">{controlError}</p>{/if}
     </section>
   {/if}
 
@@ -257,8 +352,13 @@
       {gmBusy}
       nudges={turnNudges}
       {now}
+      canSkip={isHost}
+      onSkip={passTurn}
     />
+    {#if controlError}<p class="error">{controlError}</p>{/if}
   {/if}
+
+  <div bind:this={latest} class="latest-anchor"></div>
 
   {#if me && alertsSupported() && !alertsOn && campaign.status !== 'ended'}
     <p class="alerts muted">
@@ -290,6 +390,9 @@
             {/if}
           </div>
           <div class="hp">❤️ {p.stats.hp}/{p.stats.max_hp}</div>
+          {#if isHost && p.user_id !== userId}
+            <button class="remove" onclick={() => kick(p)} aria-label={`Remove ${p.name}`} title="Remove from party">✕</button>
+          {/if}
         </li>
       {/each}
     </ul>
@@ -318,18 +421,10 @@
     {/if}
   {/if}
 
-  <section class="card">
-    <h2>Adventure log</h2>
-    <ol class="log">
-      {#each log as e (e.id)}
-        <li class={e.kind}>
-          {#if e.kind === 'action'}<strong>{nameOf(e.player_id)}:</strong>{/if}
-          {e.content}
-          {#if e.roll}<span class="pill small">🎲 d{e.roll.die} → {e.roll.result}</span>{/if}
-        </li>
-      {/each}
-    </ol>
-  </section>
+{/if}
+
+{#if campaign && !latestInView && log.length > 3}
+  <button class="jump" onclick={jumpToLatest}>⬇ Latest</button>
 {/if}
 
 {#if toast}<div class="toast" role="status">{toast}</div>{/if}
@@ -401,6 +496,7 @@
     color: var(--accent);
     padding: 0;
     border-radius: 0;
+    min-height: 0;
     text-decoration: underline;
   }
   .toast {
@@ -439,7 +535,7 @@
   .log li:last-child {
     border-bottom: none;
   }
-  .log li.narration {
+  .log li.narration .story {
     white-space: pre-wrap;
   }
   .turn {
@@ -466,6 +562,67 @@
     from {
       transform: rotate(-200deg) scale(0.6);
     }
+  }
+  .log li.turn-break {
+    border-bottom: none;
+    padding: 12px 0 0;
+    text-align: center;
+    font-size: 0.75rem;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .log li.turn-break span {
+    background: var(--card);
+    padding: 0 8px;
+  }
+  .log li.turn-break::before {
+    content: '';
+    display: block;
+    border-top: 2px solid var(--line);
+    margin-bottom: -0.75em;
+  }
+  .log li:has(+ .turn-break) {
+    border-bottom: none;
+  }
+  .log li.action {
+    background: var(--soft);
+    border-radius: 12px;
+    padding: 8px 12px;
+    margin: 6px 0;
+    border-bottom: none;
+  }
+  .small-btn {
+    min-height: 36px;
+    padding: 6px 14px;
+    font-size: 0.85rem;
+    margin-bottom: 8px;
+  }
+  .latest-anchor {
+    scroll-margin-bottom: 16px;
+  }
+  .pass {
+    margin-top: 12px;
+    font-size: 0.9rem;
+  }
+  .remove {
+    flex: none;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    background: none;
+    color: var(--muted);
+    font-size: 1rem;
+  }
+  .remove:hover {
+    color: var(--danger);
+  }
+  .jump {
+    position: fixed;
+    right: 16px;
+    bottom: calc(16px + env(safe-area-inset-bottom));
+    box-shadow: 0 4px 16px rgb(0 0 0 / 0.2);
   }
   .log li.system {
     color: var(--muted);
