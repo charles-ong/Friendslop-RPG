@@ -11,7 +11,7 @@
   import { inviteLink } from '../lib/router.svelte';
   import SettingPicker from './SettingPicker.svelte';
   import TurnStatus from './TurnStatus.svelte';
-  import { alertsEnabled, alertsSupported, enableAlerts, notify } from '../lib/alerts';
+  import { alertsEnabled, alertsSupported, enableAlerts, needsHomeScreen, notify, subscribeToPush } from '../lib/alerts';
   import { ago } from '../lib/time';
   import type { Campaign, LogEntry, Nudge, Player } from '../lib/types';
 
@@ -52,7 +52,7 @@
   $effect(() => {
     if (myTurn && campaign && campaign.turn_number !== lastTurnAlerted) {
       lastTurnAlerted = campaign.turn_number;
-      notify("It's your turn!", `${campaign.name}: the party is waiting for you.`);
+      notify("It's your turn!", `${campaign.name}: the party is waiting for you.`, `turn-${campaign.id}`);
     }
   });
 
@@ -96,6 +96,8 @@
       }
       if (!alive) return;
       seen();
+      // Keeps this browser's push subscription tied to this player.
+      if (mine && alertsOn) subscribeToPush();
 
       stop = watchCampaign(id, mine?.id, {
         onCampaign: (c) => (campaign = c),
@@ -113,7 +115,7 @@
           if (n.to_player === me?.id) {
             const from = nameOf(n.from_player);
             showToast(`👉 ${from} nudged you. It's your turn!`);
-            notify(`${from} nudged you 👉`, "It's your turn. The party is waiting!");
+            notify(`${from} nudged you 👉`, "It's your turn. The party is waiting!", `turn-${id}`);
           }
         },
         onOnline: (ids) => (presence = ids),
@@ -259,7 +261,13 @@
 
   {#if me && alertsSupported() && !alertsOn && campaign.status !== 'ended'}
     <p class="alerts muted">
-      <button class="link" onclick={turnOnAlerts}>Turn on notifications</button> to hear when it's your turn.
+      <button class="link" onclick={turnOnAlerts}>Turn on notifications</button> to hear when it's your turn,
+      even with this page closed.
+    </p>
+  {:else if me && needsHomeScreen() && campaign.status !== 'ended'}
+    <p class="alerts muted">
+      To get a ping when it's your turn on iPhone, tap Share → <strong>Add to Home Screen</strong>, then open
+      Friendslop from there and turn on notifications.
     </p>
   {/if}
 

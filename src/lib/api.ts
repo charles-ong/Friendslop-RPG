@@ -70,6 +70,23 @@ export async function markSeen(campaignId: string): Promise<void> {
 
 export async function nudge(campaignId: string): Promise<void> {
   unwrap(await supabase.rpc('nudge', { cid: campaignId }));
+  // Also push it to their phone. The nudge already counts if this fails.
+  gamemaster({ type: 'nudge_push', campaign_id: campaignId }).catch(() => null);
+}
+
+export async function vapidPublicKey(): Promise<string> {
+  const { key } = await gamemaster<{ key: string }>({ type: 'vapid_public_key' });
+  return key;
+}
+
+export async function savePushSubscription(sub: PushSubscriptionJSON): Promise<void> {
+  unwrap(
+    await supabase.rpc('save_push_subscription', {
+      sub_endpoint: sub.endpoint,
+      sub_p256dh: sub.keys?.p256dh,
+      sub_auth: sub.keys?.auth,
+    }),
+  );
 }
 
 export async function loadCampaign(campaignId: string) {
