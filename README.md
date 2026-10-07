@@ -25,7 +25,8 @@ npm run dev
    [`supabase/migrations/20261007010000_turn_loop.sql`](supabase/migrations/20261007010000_turn_loop.sql)
    the same way, then
    [`supabase/migrations/20261007020000_setting.sql`](supabase/migrations/20261007020000_setting.sql)
-   and [`supabase/migrations/20261007030000_pause_nudge.sql`](supabase/migrations/20261007030000_pause_nudge.sql).
+   , [`supabase/migrations/20261007030000_pause_nudge.sql`](supabase/migrations/20261007030000_pause_nudge.sql)
+   and [`supabase/migrations/20261007040000_web_push.sql`](supabase/migrations/20261007040000_web_push.sql).
 4. **Groq key:** Edge Functions → Secrets → add `GROQ_API_KEY`. Optionally add `GROQ_MODEL`
    (tried first; otherwise `openai/gpt-oss-120b`, then other Groq models your key can use).
 5. **Gamemaster function:** create a personal access token at
@@ -61,6 +62,11 @@ Every push to `main` then builds and deploys the site.
   "The world is paused" with when they were last seen. Nothing happens to the party until that
   player acts, so nobody is left in danger.
 - Nudging: waiting players can `nudge` the current player (once per 5 minutes each). The nudge is
-  logged, shows as a toast for the target, and pops a browser notification if they turned
-  notifications on and the tab is in the background. The tab title says "(Your turn!)" too.
+  logged and shows as a toast for the target. The tab title says "(Your turn!)" too.
+- Notifications: "Turn on notifications" subscribes the browser to Web Push (`public/sw.js`) and
+  saves the subscription with `save_push_subscription`. The `gamemaster` function pushes
+  "Your turn" whenever the turn passes to someone, and pushes each nudge to its target, so they
+  arrive with the site closed. Its VAPID keys are generated on first use and stored in the private
+  `app_secrets` table; there's nothing to configure. On iPhone, notifications need the site added
+  to the home screen first (Share → Add to Home Screen), then turned on from the installed app.
 - Invite links look like `…/#/join/ABC234`. Hash routing keeps deep links working on GitHub Pages.

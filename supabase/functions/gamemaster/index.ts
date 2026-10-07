@@ -1,11 +1,25 @@
-// The AI Gamemaster. Three requests, by `type`:
+// The AI Gamemaster. Requests, by `type`:
 //   suggest_settings  host, in the lobby: three setting ideas to pick from
 //   begin             host, in the lobby: write the opening scene and start
 //   turn (default)    current player: narrate their action and pass the turn
+//   vapid_public_key  anyone signed in: the key browsers need to subscribe to Web Push
+//   nudge_push        after the `nudge` RPC: push that nudge to its target
+//
+// Whenever the turn passes to someone, they get a Web Push notification.
+// The VAPID keys for that are created on first use and kept in app_secrets.
 //
 // Secrets: GROQ_API_KEY (required), GROQ_MODEL (optional, tried first).
 
 import { createClient } from 'npm:@supabase/supabase-js@2';
+import {
+  ApplicationServer,
+  exportApplicationServerKey,
+  exportVapidKeys,
+  generateVapidKeys,
+  importVapidKeys,
+  PushMessageError,
+  Urgency,
+} from 'jsr:@negrel/webpush@0.5.0';
 
 // Tried in order; a model the key can't use (404) falls through to the next.
 const GROQ_MODELS = [
@@ -243,6 +257,7 @@ Write the opening scene. Set the place and mood in a vivid but short way, bring 
     opening: narration,
   });
   if (error) throw error;
+  await pushTurn(campaignId);
   return { ok: true };
 }
 
@@ -301,12 +316,141 @@ async function takeTurn(campaignId: string, userId: string, action: string, resu
     });
     if (finishError) throw finishError;
 
+    await pushTurn(campaignId);
     return json({ ok: true });
   } catch (e) {
     console.error(e);
     await admin.rpc('abort_turn', { cid: campaignId, action_entry_id: actionId });
     return json({ error: explain(e, 'The Gamemaster lost their notes. Please try again.') }, 502);
   }
+}
+
+// --- Web Push -------------------------------------------------------------
+
+let appServer: Promise<{ server: ApplicationServer; publicKey: string }> | null = null;
+
+async function loadVapidKeys() {
+  const { data, error } = await admin.from('app_secrets').select('value').eq('name', 'vapid').maybeSingle();
+  if (error) throw error;
+  if (data) return importVapidKeys(data.value, { extractable: false });
+
+  const fresh = await exportVapidKeys(await generateVapidKeys({ extractable: true }));
+  // Two first requests at once: whichever insert lands wins, both use it.
+  await admin.from('app_secrets').upsert({ name: 'vapid', value: fresh }, { onConflict: 'name', ignoreDuplicates: true });
+  const { data: saved, error: again } = await admin.from('app_secrets').select('value').eq('name', 'vapid').single();
+  if (again) throw again;
+  return importVapidKeys(saved.value, { extractable: false });
+}
+
+function getAppServer() {
+  appServer ??= (async () => {
+    const vapidKeys = await loadVapidKeys();
+    return {
+      server: await ApplicationServer.new({ contactInformation: 'mailto:friendslop-rpg@users.noreply.github.com', vapidKeys }),
+      publicKey: await exportApplicationServerKey(vapidKeys),
+    };
+  })();
+  appServer.catch(() => (appServer = null));
+  return appServer;
+}
+
+// `url` is a hash route; the service worker resolves it against the site.
+type PushMessage = { title: string; body: string; url: string; tag: string };
+
+// Best-effort: a failed push never fails the request that triggered it.
+async function pushToUser(userId: string, message: PushMessage) {
+  try {
+    const { data: subs } = await admin
+      .from('push_subscriptions')
+      .select('endpoint, p256dh, auth')
+      .eq('user_id', userId);
+    if (!subs?.length) return;
+
+    const { server } = await getAppServer();
+    await Promise.all(
+      subs.map(async (s) => {
+        try {
+          const subscriber = server.subscribe({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } });
+          await subscriber.pushTextMessage(JSON.stringify(message), {
+            urgency: Urgency.High,
+            ttl: 60 * 60 * 24,
+            topic: message.tag.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32),
+          });
+        } catch (e) {
+          if (e instanceof PushMessageError && (e.isGone() || e.response.status === 404)) {
+            await admin.from('push_subscriptions').delete().eq('endpoint', s.endpoint);
+          } else {
+            console.error('push failed', e);
+          }
+        }
+      }),
+    );
+  } catch (e) {
+    console.error('push skipped', e);
+  }
+}
+
+async function pushTurn(campaignId: string) {
+  const { data: campaign } = await admin
+    .from('campaigns')
+    .select('name, current_player_id')
+    .eq('id', campaignId)
+    .maybeSingle();
+  if (!campaign?.current_player_id) return;
+  const { data: player } = await admin
+    .from('players')
+    .select('user_id, name')
+    .eq('id', campaign.current_player_id)
+    .maybeSingle();
+  if (!player) return;
+  await pushToUser(player.user_id, {
+    title: `Your turn in ${campaign.name} 🎲`,
+    body: `${player.name}, the party is waiting on you.`,
+    url: `#/c/${campaignId}`,
+    tag: `turn-${campaignId}`,
+  });
+}
+
+async function pushNudge(campaignId: string, userId: string) {
+  const { data: sender } = await admin
+    .from('players')
+    .select('id, name')
+    .eq('campaign_id', campaignId)
+    .eq('user_id', userId)
+    .maybeSingle();
+  if (!sender) return;
+
+  // Claim this sender's newest unpushed nudge, so each nudge pushes at most once.
+  const { data: latest } = await admin
+    .from('nudges')
+    .select('id')
+    .eq('from_player', sender.id)
+    .is('pushed_at', null)
+    .gt('created_at', new Date(Date.now() - 60_000).toISOString())
+    .order('id', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (!latest) return;
+  const { data: claimed } = await admin
+    .from('nudges')
+    .update({ pushed_at: new Date().toISOString() })
+    .eq('id', latest.id)
+    .is('pushed_at', null)
+    .select('to_player')
+    .maybeSingle();
+  if (!claimed) return;
+  const [{ data: target }, { data: campaign }] = await Promise.all([
+    admin.from('players').select('user_id').eq('id', claimed.to_player).maybeSingle(),
+    admin.from('campaigns').select('name').eq('id', campaignId).maybeSingle(),
+  ]);
+  if (!target) return;
+
+  await pushToUser(target.user_id, {
+    title: `${sender.name} nudged you 👉`,
+    body: `It's your turn in ${campaign?.name ?? 'your adventure'}.`,
+    url: `#/c/${campaignId}`,
+    tag: `turn-${campaignId}`,
+  });
 }
 
 Deno.serve(async (req) => {
@@ -318,8 +462,23 @@ Deno.serve(async (req) => {
   if (!auth.user) return json({ error: 'Not signed in.' }, 401);
 
   const body = await req.json().catch(() => null);
+
+  if (body?.type === 'vapid_public_key') {
+    try {
+      return json({ key: (await getAppServer()).publicKey });
+    } catch (e) {
+      console.error(e);
+      return json({ error: explain(e, "Couldn't set up notifications.") }, 502);
+    }
+  }
+
   const campaignId = body?.campaign_id as string | undefined;
   if (!campaignId) return json({ error: 'Send campaign_id.' }, 400);
+
+  if (body.type === 'nudge_push') {
+    await pushNudge(campaignId, auth.user.id);
+    return json({ ok: true });
+  }
 
   if (body.type === 'suggest_settings' || body.type === 'begin') {
     const setting = String(body.setting ?? '').trim().slice(0, 600);
