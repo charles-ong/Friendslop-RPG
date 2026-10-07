@@ -7,6 +7,7 @@ export type Campaign = {
   turn_number: number;
   current_player_id: string | null;
   gm_busy_since: string | null;
+  setting: string | null;
   created_at: string;
 };
 
@@ -31,3 +32,5 @@ export type LogEntry = {
   roll: { die: number; result: number } | null;
   created_at: string;
 };
+
+export type SettingIdea = { title: string; pitch: string };

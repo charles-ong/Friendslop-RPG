@@ -1,5 +1,5 @@
 import { supabase } from './supabase';
-import type { Campaign, LogEntry, Player } from './types';
+import type { Campaign, LogEntry, Player, SettingIdea } from './types';
 
 function unwrap<T>({ data, error }: { data: T | null; error: { message: string } | null }): T {
   if (error) throw new Error(error.message);
@@ -14,10 +14,6 @@ export async function createCampaign(campaignName: string, playerName: string): 
 
 export async function joinCampaign(code: string, playerName: string): Promise<Campaign> {
   return unwrap(await supabase.rpc('join_campaign', { join_code: code, player_name: playerName }));
-}
-
-export async function startCampaign(campaignId: string): Promise<void> {
-  unwrap(await supabase.rpc('start_campaign', { cid: campaignId }));
 }
 
 export async function updateMyCharacter(campaignId: string, name: string, character: string) {
@@ -37,15 +33,35 @@ export function rollD20(): number {
   return (buf[0] % 20) + 1;
 }
 
+async function gamemaster<T>(body: Record<string, unknown>): Promise<T> {
+  const { data, error } = await supabase.functions.invoke('gamemaster', { body });
+  if (!error) return data as T;
+  // An HTTP error carries the function's own message; anything else means
+  // the function couldn't be reached at all.
+  const context = (error as { context?: unknown }).context;
+  if (context instanceof Response) {
+    const payload = await context.json().catch(() => null);
+    if (payload?.error) throw new Error(payload.error);
+    if (context.status === 404) throw new Error('The Gamemaster function isn\'t deployed yet.');
+    throw new Error(`The Gamemaster replied with an error (${context.status}).`);
+  }
+  throw new Error("Couldn't reach the Gamemaster. Is the gamemaster function deployed?");
+}
+
 export async function takeTurn(campaignId: string, action: string, roll: number): Promise<void> {
-  const { error } = await supabase.functions.invoke('gamemaster', {
-    body: { campaign_id: campaignId, action, roll },
+  await gamemaster({ campaign_id: campaignId, action, roll });
+}
+
+export async function suggestSettings(campaignId: string): Promise<SettingIdea[]> {
+  const { settings } = await gamemaster<{ settings: SettingIdea[] }>({
+    type: 'suggest_settings',
+    campaign_id: campaignId,
   });
-  if (!error) return;
-  // Surface the function's own message when it sent one.
-  const context = (error as { context?: Response }).context;
-  const body = context ? await context.json().catch(() => null) : null;
-  throw new Error(body?.error ?? error.message);
+  return settings;
+}
+
+export async function beginCampaign(campaignId: string, setting: string): Promise<void> {
+  await gamemaster({ type: 'begin', campaign_id: campaignId, setting });
 }
 
 export async function loadCampaign(campaignId: string) {

@@ -1,5 +1,7 @@
-// The AI Gamemaster. The current player posts their action and dice roll;
-// this logs it, asks Groq to narrate, records the result and passes the turn.
+// The AI Gamemaster. Three requests, by `type`:
+//   suggest_settings  host, in the lobby: three setting ideas to pick from
+//   begin             host, in the lobby: write the opening scene and start
+//   turn (default)    current player: narrate their action and pass the turn
 //
 // Secrets: GROQ_API_KEY (required), GROQ_MODEL (optional).
 
@@ -59,6 +61,7 @@ function describeRoll(roll: Entry['roll']) {
 
 function buildMessages(
   campaignName: string,
+  setting: string | null,
   players: Player[],
   history: Entry[],
   actor: Player,
@@ -81,7 +84,7 @@ function buildMessages(
     .join('\n');
 
   const user = `Campaign: ${campaignName}
-
+${setting ? `Setting: ${setting}\n` : ''}
 Party:
 ${party}
 
@@ -99,7 +102,7 @@ The next player is ${next.name}.`;
   ];
 }
 
-async function narrate(messages: { role: string; content: string }[]) {
+async function chat(messages: { role: string; content: string }[], maxTokens = 700) {
   const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -110,14 +113,18 @@ async function narrate(messages: { role: string; content: string }[]) {
       model: GROQ_MODEL,
       messages,
       temperature: 0.9,
-      max_tokens: 700,
+      max_tokens: maxTokens,
       response_format: { type: 'json_object' },
     }),
   });
   if (!res.ok) throw new Error(`Groq ${res.status}: ${await res.text()}`);
 
   const data = await res.json();
-  const parsed = JSON.parse(data.choices[0].message.content);
+  return JSON.parse(data.choices[0].message.content);
+}
+
+async function narrate(messages: { role: string; content: string }[]) {
+  const parsed = await chat(messages);
   if (typeof parsed.narration !== 'string' || !parsed.narration.trim()) {
     throw new Error('Gamemaster returned no narration.');
   }
@@ -127,26 +134,77 @@ async function narrate(messages: { role: string; content: string }[]) {
   };
 }
 
-Deno.serve(async (req) => {
-  if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
-  if (req.method !== 'POST') return json({ error: 'Method not allowed' }, 405);
+function partyLines(players: Player[]) {
+  return players
+    .map((p) => `- ${p.name}${p.character ? `: ${p.character}` : ''}`)
+    .join('\n');
+}
 
-  const jwt = req.headers.get('Authorization')?.replace(/^Bearer /, '');
-  const { data: auth } = jwt ? await admin.auth.getUser(jwt) : { data: { user: null } };
-  if (!auth.user) return json({ error: 'Not signed in.' }, 401);
-
-  const body = await req.json().catch(() => null);
-  const campaignId = body?.campaign_id as string | undefined;
-  const action = (body?.action as string | undefined)?.trim().slice(0, 500);
-  const result = Number(body?.roll);
-  if (!campaignId || !action || !Number.isInteger(result) || result < 1 || result > 20) {
-    return json({ error: 'Send campaign_id, action and a d20 roll.' }, 400);
+async function loadLobby(campaignId: string, userId: string) {
+  const [{ data: campaign }, { data: players }] = await Promise.all([
+    admin.from('campaigns').select('name, status, created_by').eq('id', campaignId).maybeSingle(),
+    admin.from('players').select('id, name, seat, character, stats').eq('campaign_id', campaignId).order('seat'),
+  ]);
+  if (!campaign || campaign.created_by !== userId || campaign.status !== 'lobby') {
+    throw new Error('Only the host can do that, before the adventure starts.');
   }
+  return { name: campaign.name as string, players: players as Player[] };
+}
+
+async function suggestSettings(campaignId: string, userId: string) {
+  const { name, players } = await loadLobby(campaignId, userId);
+  const parsed = await chat(
+    [
+      {
+        role: 'system',
+        content: `You pitch settings for a cozy-but-dangerous fantasy text RPG played by friends. Make the three pitches clearly different from each other in place, tone and genre flavour (for example: whimsical, mysterious, swashbuckling). Each has a short evocative title and a 2-sentence pitch that hints at a first problem to solve. Fit them to the party if their characters suggest anything.
+
+Reply with JSON only: {"settings": [{"title": string, "pitch": string}, ...three items]}`,
+      },
+      { role: 'user', content: `Campaign name: ${name}\n\nParty:\n${partyLines(players)}` },
+    ],
+    500,
+  );
+  const settings = (Array.isArray(parsed.settings) ? parsed.settings : [])
+    .filter((s: { title?: unknown; pitch?: unknown }) => typeof s?.title === 'string' && typeof s?.pitch === 'string')
+    .slice(0, 3);
+  if (settings.length === 0) throw new Error('No settings came back.');
+  return { settings };
+}
+
+async function begin(campaignId: string, userId: string, setting: string) {
+  const { name, players } = await loadLobby(campaignId, userId);
+  const first = players[0];
+  const { narration } = await narrate([
+    { role: 'system', content: SYSTEM_PROMPT },
+    {
+      role: 'user',
+      content: `Campaign: ${name}
+Setting: ${setting}
+
+Party:
+${partyLines(players)}
+
+Write the opening scene. Set the place and mood in a vivid but short way, bring the party together, and present a first situation or problem. Nobody has acted yet, so don't decide anything for the players. End by turning the spotlight to ${first.name}, who goes first. Use "hp_changes": [].`,
+    },
+  ]);
+
+  const { error } = await admin.rpc('begin_campaign', {
+    cid: campaignId,
+    uid: userId,
+    new_setting: setting,
+    opening: narration,
+  });
+  if (error) throw error;
+  return { ok: true };
+}
+
+async function takeTurn(campaignId: string, userId: string, action: string, result: number) {
   const roll = { die: 20, result };
 
   const { data: actionId, error: beginError } = await admin.rpc('begin_turn', {
     cid: campaignId,
-    uid: auth.user.id,
+    uid: userId,
     action,
     roll,
   });
@@ -154,7 +212,7 @@ Deno.serve(async (req) => {
 
   try {
     const [{ data: campaign }, { data: players }, { data: history }] = await Promise.all([
-      admin.from('campaigns').select('name, current_player_id').eq('id', campaignId).single(),
+      admin.from('campaigns').select('name, setting, current_player_id').eq('id', campaignId).single(),
       admin.from('players').select('id, name, seat, character, stats').eq('campaign_id', campaignId).order('seat'),
       admin
         .from('log_entries')
@@ -170,7 +228,16 @@ Deno.serve(async (req) => {
     const next = party.find((p) => p.seat > actor.seat) ?? party[0];
 
     const { narration, hpChanges } = await narrate(
-      buildMessages(campaign!.name, party, (history as Entry[]).reverse(), actor, next, action, roll),
+      buildMessages(
+        campaign!.name,
+        campaign!.setting,
+        party,
+        (history as Entry[]).reverse(),
+        actor,
+        next,
+        action,
+        roll,
+      ),
     );
 
     const changes = hpChanges
@@ -193,4 +260,40 @@ Deno.serve(async (req) => {
     await admin.rpc('abort_turn', { cid: campaignId, action_entry_id: actionId });
     return json({ error: 'The Gamemaster lost their notes. Please try again.' }, 502);
   }
+}
+
+Deno.serve(async (req) => {
+  if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
+  if (req.method !== 'POST') return json({ error: 'Method not allowed' }, 405);
+
+  const jwt = req.headers.get('Authorization')?.replace(/^Bearer /, '');
+  const { data: auth } = jwt ? await admin.auth.getUser(jwt) : { data: { user: null } };
+  if (!auth.user) return json({ error: 'Not signed in.' }, 401);
+
+  const body = await req.json().catch(() => null);
+  const campaignId = body?.campaign_id as string | undefined;
+  if (!campaignId) return json({ error: 'Send campaign_id.' }, 400);
+
+  if (body.type === 'suggest_settings' || body.type === 'begin') {
+    const setting = String(body.setting ?? '').trim().slice(0, 600);
+    if (body.type === 'begin' && !setting) return json({ error: 'Pick or write a setting first.' }, 400);
+    try {
+      return json(
+        body.type === 'begin'
+          ? await begin(campaignId, auth.user.id, setting)
+          : await suggestSettings(campaignId, auth.user.id),
+      );
+    } catch (e) {
+      console.error(e);
+      const message = (e as Error).message;
+      return json({ error: message.startsWith('Only the host') ? message : 'The Gamemaster got distracted. Please try again.' }, 502);
+    }
+  }
+
+  const action = (body.action as string | undefined)?.trim().slice(0, 500);
+  const result = Number(body.roll);
+  if (!action || !Number.isInteger(result) || result < 1 || result > 20) {
+    return json({ error: 'Send an action and a d20 roll.' }, 400);
+  }
+  return takeTurn(campaignId, auth.user.id, action, result);
 });
